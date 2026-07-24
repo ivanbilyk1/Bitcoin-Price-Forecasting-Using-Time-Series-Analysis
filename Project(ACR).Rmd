@@ -1,0 +1,839 @@
+---
+title: "Projekt: Predikcia ceny Bitcoinu pomocou modelov časových radov"
+author: "Ivan Bilyk"
+date: "02.06.2026"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+# Úvod
+
+Cieľom projektu je analyzovať a predikovať ceny kryptomien Bitcoin (za 2022-2026) pomocou metód časových radov.  
+Budeme skúmať trend, stacionaritu, vhodnosť modelov ARIMA a ETS a porovnáme ich presnosť.
+
+## Načítanie balíkov a dát
+```{r setup, message=FALSE, warning=FALSE}
+library(quantmod)
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(knitr)
+library(lubridate)
+```
+
+## Dáta
+
+```{r data}
+getSymbols(c("BTC-USD","ETH-USD"),
+           src = "yahoo",
+           from = "2022-01-01",
+           to = Sys.Date())
+
+btc <- na.omit(Cl(`BTC-USD`))
+
+btc_ts <- ts(as.numeric(btc), frequency = 365)
+```
+### Deskriptívne štatistiky
+
+```{r descriptive-stats-both}
+stats_table <- data.frame(
+  Metrika = c("Minimum",
+              "Maximum",
+              "Medián",
+              "Priemer",
+              "Smerodajná odchýlka"),
+
+  Bitcoin = c(
+    min(btc_ts),
+    max(btc_ts),
+    median(btc_ts),
+    mean(btc_ts),
+    sd(btc_ts)
+  )
+)
+
+knitr::kable(
+  stats_table,
+  caption = "Deskriptívne štatistiky cien kryptomien"
+)
+```
+### Rozdelenie dát na trénovaciu a testovaciu vzorku
+
+```{r train-test-split}
+
+# Počet pozorovaní v časovom rade
+n_btc <- length(btc_ts)
+
+# 80 % dát použijeme na trénovanie modelu
+train_btc <- floor(0.8 * n_btc)
+
+# Rozdelenie Bitcoinu na trénovaciu a testovaciu vzorku
+btc_train <- window(
+  btc_ts,
+  end = time(btc_ts)[train_btc]
+)
+
+btc_test <- window(
+  btc_ts,
+  start = time(btc_ts)[train_btc + 1]
+)
+
+# Prehľadná tabuľka počtu pozorovaní
+split_table <- data.frame(
+  Kryptomena = "Bitcoin",
+  Trening = length(btc_train),
+  Test = length(btc_test)
+)
+
+knitr::kable(
+  split_table,
+  caption = "Rozdelenie dát na trénovaciu a testovaciu vzorku"
+)
+
+```
+# Explorácia časového radu
+
+## Dekompozícia
+
+### Klasická multiplikatívna dekompozícia
+
+```{r decomposition-classic}
+
+# Klasická dekompozícia rozdeľuje časový rad na trend,
+# sezónnu zložku a náhodnú zložku.
+
+btc_decomp <- decompose(btc_train,
+                        type = "multiplicative")
+
+autoplot(btc_decomp) +
+  ggtitle("Klasická multiplikatívna dekompozícia cien Bitcoinu")
+```
+Z grafu klasickej multiplikatívnej dekompozície možno pozorovať výrazný rastúci trend ceny Bitcoinu počas sledovaného obdobia. Trendová zložka po počiatočnom poklese postupne rastie, čo odráža dlhodobý rast hodnoty kryptomeny.
+
+Sezónna zložka naznačuje opakujúce sa cyklické výkyvy. Ich amplitúda je však relatívne malá v porovnaní s celkovou cenou Bitcoinu, preto sezónnosť nepredstavuje dominantnú zložku časového radu.
+
+Náhodná (reziduálna) zložka obsahuje krátkodobé cenové výkyvy spôsobené neočakávanými udalosťami na trhu. Viditeľné sú najmä obdobia zvýšenej volatility, ktoré sú pre kryptomenové trhy typické.
+
+### STL dekompozícia
+
+```{r decomposition-stl}
+
+# STL dekompozícia využíva LOESS vyhladzovanie
+# a je flexibilnejšia ako klasická dekompozícia.
+
+btc_stl <- stl(btc_train,
+               s.window = "periodic")
+
+autoplot(btc_stl) +
+  ggtitle("STL dekompozícia cien Bitcoinu")
+
+```
+STL dekompozícia poskytuje flexibilnejší pohľad na štruktúru časového radu.
+
+Trendová zložka jasne ukazuje dlhodobý rast ceny Bitcoinu. Po počiatočnej stagnácii dochádza k výraznému rastu, ktorý pokračuje až do konca sledovaného obdobia.
+
+Sezónna zložka zachytáva pravidelné krátkodobé cykly. Hoci sezónnosť existuje, jej vplyv je výrazne menší ako vplyv trendu.
+
+Reziduá sú sústredené okolo nuly, avšak obsahujú výrazné výkyvy. Tie predstavujú neočakávané pohyby cien spôsobené externými faktormi, ako sú ekonomické správy, regulačné opatrenia alebo zmeny nálady investorov.
+
+## Trendová analýza
+
+### Log-transformácia a lineárny trend
+
+```{r linear-trend}
+btc_log <- log(btc_train)
+
+time_index <- 1:length(btc_log)
+
+trend_linear_btc <- lm(btc_log ~ time_index)
+
+summary(trend_linear_btc)
+```
+Pre lineárny trendový model boli odhadnuté koeficienty:
+
+\[
+\log(\text{Cena}) = 9.846 + 0.001246 \cdot t
+\]
+
+Oba parametre sú štatisticky významné (p < 0.001).
+
+Kladný koeficient pri premennej čas znamená, že cena Bitcoinu má v sledovanom období rastúci trend.
+
+Hodnota R-squared = 0.6667 znamená, že lineárny trend vysvetľuje približne 66.7 % variability logaritmovaných cien Bitcoinu.
+
+F-test (F = 2579, p < 0.001) potvrdzuje štatistickú významnosť celého modelu.
+
+### Kvadratický trend
+
+```{r quadratic-trend}
+trend_quadratic_btc <- lm(
+  btc_log ~ time_index + I(time_index^2)
+)
+
+summary(trend_quadratic_btc)
+```
+Pre kvadratický trendový model boli odhadnuté koeficienty:
+
+\[
+\log(\text{Cena})
+=
+10.34
+-0.001028\,t
++1.76 \times 10^{-6} t^2
+\]
+
+Všetky parametre modelu sú štatisticky významné (p < 0.001).
+
+Záporný lineárny člen a kladný kvadratický člen naznačujú, že vývoj ceny nie je lineárny. Na začiatku obdobia dochádza k poklesu cien, následne sa trend obracia a ceny začínajú rásť.
+
+Hodnota R-squared = 0.8145 znamená, že model vysvetľuje približne 81.45 % variability logaritmovaných cien, čo predstavuje výrazné zlepšenie oproti lineárnemu modelu.
+
+F-test (F = 2829, p < 0.001) potvrdzuje štatistickú významnosť modelu.
+
+### Porovnanie a Vizualizacia
+
+```{r}
+AIC(trend_linear_btc, trend_quadratic_btc)
+
+# Predikcie log-trendov a spätná transformácia do pôvodnej mierky ceny
+pred_linear_btc <- exp(predict(trend_linear_btc))
+pred_quadratic_btc <- exp(predict(trend_quadratic_btc))
+
+# Dekompozičný trend, ak už máš btc_decomp
+decomp_trend_btc <- btc_decomp$trend
+
+# Dátový rámec pre ggplot
+df_trend_btc <- data.frame(
+  Time = as.numeric(time(btc_train)),
+  Observed = as.numeric(btc_train),
+  Linear = as.numeric(pred_linear_btc),
+  Quadratic = as.numeric(pred_quadratic_btc),
+  Decomposition = as.numeric(decomp_trend_btc)
+)
+
+ggplot(df_trend_btc, aes(x = Time)) +
+  geom_line(aes(y = Observed, colour = "Skutočné dáta"), linewidth = 0.8) +
+  geom_line(aes(y = Linear, colour = "Lineárny trend"), 
+            linetype = "dashed", linewidth = 0.8) +
+  geom_line(aes(y = Quadratic, colour = "Kvadratický trend"), 
+            linetype = "dotted", linewidth = 0.8) +
+  geom_line(aes(y = Decomposition, colour = "Dekomp. trend"), 
+            linetype = "dotdash", linewidth = 0.8, na.rm = TRUE) +
+  scale_colour_manual(
+    values = c(
+      "Skutočné dáta" = "black",
+      "Lineárny trend" = "red",
+      "Kvadratický trend" = "blue",
+      "Dekomp. trend" = "darkgreen"
+    )
+  ) +
+  labs(
+    title = "Porovnanie trendov cien Bitcoinu",
+    x = "Čas",
+    y = "Cena Bitcoinu v USD",
+    colour = ""
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+Na porovnanie modelov bolo použité Akaikeho informačné kritérium (AIC).
+
+Lineárny model dosiahol hodnotu AIC = 793.10, zatiaľ čo kvadratický model AIC = 38.44.
+
+Keďže nižšia hodnota AIC znamená lepší kompromis medzi presnosťou a zložitosťou modelu, kvadratický trend je jednoznačne vhodnejší ako lineárny trend.
+
+Graf porovnáva skutočné ceny Bitcoinu s lineárnym trendom, kvadratickým trendom a trendom získaným pomocou dekompozície časového radu.
+
+Lineárny trend zachytáva iba celkový rast cien počas sledovaného obdobia. Hoci správne identifikuje rastúci smer vývoja, nedokáže opísať výrazné zmeny dynamiky trhu a podhodnocuje ceny v závere sledovaného obdobia.
+
+Kvadratický trend sa prispôsobuje dátam podstatne lepšie. Zachytáva počiatočný pokles cien aj následný prudký rast. V závere obdobia však začína ceny mierne nadhodnocovať, čo je dôsledok kvadratického tvaru modelu.
+
+Trend získaný pomocou dekompozície najlepšie kopíruje dlhodobý vývoj pozorovaných cien. Je hladší a menej ovplyvnený krátkodobými výkyvmi trhu, pričom zachytáva hlavné fázy rastu a poklesu.
+
+Na základe vizuálneho porovnania, hodnôt R-squared a informačného kritéria AIC možno konštatovať, že kvadratický trend poskytuje výrazne lepší opis vývoja cien Bitcoinu než jednoduchý lineárny trend. Dekompozičný trend zároveň predstavuje vhodný nástroj na identifikáciu dlhodobého vývoja časového radu.
+
+### Stacionarita
+
+```{r stationarity-test}
+adf.test(btc_train)
+
+btc_diff <- diff(btc_train)
+adf.test(na.omit(btc_diff))
+```
+
+ADF test bol použitý na overenie stacionarity časového radu. Ak je p-hodnota väčšia ako 0.05, časový rad považujeme za nestacionárny. Po diferenciácii by mala byť p-hodnota menšia ako 0.05, čo odôvodňuje použitie ARIMA modelov s diferenciáciou.
+
+## Sezónna zložka
+
+### Analýza efektu dňa v týždni
+
+```{r weekday-effect}
+
+# Vytvorenie dátového rámca
+btc_df <- data.frame(
+  Price = as.numeric(btc),
+  Date = index(btc)
+)
+
+# Deň v týždni (slovenské názvy)
+btc_df$Weekday <- factor(
+  wday(btc_df$Date),
+  levels = 1:7,
+  labels = c(
+    "Nedeľa",
+    "Pondelok",
+    "Utorok",
+    "Streda",
+    "Štvrtok",
+    "Piatok",
+    "Sobota"
+  )
+)
+
+# Počet pozorovaní podľa dní
+weekday_table <- as.data.frame(table(btc_df$Weekday))
+colnames(weekday_table) <- c("Deň_v_týždni", "Počet_pozorovaní")
+
+knitr::kable(
+  weekday_table,
+  caption = "Počet pozorovaní podľa dní v týždni"
+)
+
+# Model s dummy premennými
+weekday_model <- lm(log(Price) ~ Weekday,
+                    data = btc_df)
+
+summary(weekday_model)
+
+# Boxplot
+ggplot(btc_df,
+       aes(x = Weekday,
+           y = Price)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(
+    title = "Ceny Bitcoinu podľa dní v týždni",
+    x = "Deň v týždni",
+    y = "Cena Bitcoinu (USD)"
+  ) +
+  theme_minimal()
+
+
+```
+
+### Sezónne modelovanie pomocou goniometrických funkcií
+
+```{r seasonal-trig-plot-correct}
+
+# Vytvorenie goniometrických premenných pre celý časový rad
+btc_df$sin_week <- sin(2 * pi * (1:nrow(btc_df)) / 7)
+btc_df$cos_week <- cos(2 * pi * (1:nrow(btc_df)) / 7)
+
+# Odhad goniometrického modelu sezónnosti
+seasonal_trig_model <- lm(
+  log(Price) ~ sin_week + cos_week,
+  data = btc_df
+)
+
+summary(seasonal_trig_model)
+
+# Vytvoríme typický týždeň pre vizualizáciu sezónneho efektu
+week_df <- data.frame(
+  Day = 1:7
+)
+
+week_df$sin_week <- sin(2 * pi * week_df$Day / 7)
+week_df$cos_week <- cos(2 * pi * week_df$Day / 7)
+
+# Predikcia sezónnej zložky pre jeden týždeň
+week_df$Seasonal <- exp(
+  predict(
+    seasonal_trig_model,
+    newdata = week_df
+  )
+)
+
+week_df$Weekday <- factor(
+  c("Nedeľa", "Pondelok", "Utorok", "Streda",
+    "Štvrtok", "Piatok", "Sobota"),
+  levels = c("Nedeľa", "Pondelok", "Utorok", "Streda",
+             "Štvrtok", "Piatok", "Sobota")
+)
+
+ggplot(
+  week_df,
+  aes(x = Weekday,
+      y = Seasonal,
+      group = 1)
+) +
+  geom_line(colour = "darkorange",
+            linewidth = 1) +
+  geom_point(colour = "darkorange",
+             size = 3) +
+  labs(
+    title = "Goniometrický model týždennej sezónnosti Bitcoinu",
+    x = "Deň v týždni",
+    y = "Odhad sezónnej zložky"
+  ) +
+  theme_minimal()
+
+```
+Graf zobrazuje odhad týždennej sezónnej zložky pomocou sínusovej a kosínusovej funkcie.
+
+Model vytvára hladký cyklický priebeh s maximom približne v strede týždňa a minimom počas víkendu. Tento priebeh je však výsledkom matematickej aproximácie a nie skutočného sezónneho správania trhu.
+
+Štatistické testy nepotvrdili významnosť modelu. Koeficienty pri premenných sin_week (p = 0.952) a cos_week (p = 0.934) nie sú štatisticky významné. Rovnako ani F-test celého modelu (p = 0.9948) nepotvrdil významnosť sezónnej zložky.
+
+Hodnota R-squared je prakticky nulová (0.000007), čo znamená, že goniometrický model nevysvetľuje variabilitu cien Bitcoinu.
+
+Na základe výsledkov možno konštatovať, že ceny Bitcoinu nevykazujú významnú týždennú sezónnosť. Dominantnú úlohu zohráva trend a náhodné trhové výkyvy.
+
+## Analýza rezíduí
+
+### Rezíduá po odstránení kvadratického trendu
+
+```{r residuals-analysis}
+
+# Rezíduá kvadratického trendu
+residuals_btc <- residuals(trend_quadratic_btc)
+
+# Korelogram
+par(mfrow = c(1,2))
+
+acf(residuals_btc,
+    main = "ACF rezíduí")
+
+pacf(residuals_btc,
+     main = "PACF rezíduí")
+
+par(mfrow = c(1,1))
+
+plot(
+  time(btc_train),
+  residuals_btc,
+  type = "l",
+  col = "darkred",
+  lwd = 1,
+  main = "Rezíduá po odstránení kvadratického trendu",
+  xlab = "Čas",
+  ylab = "Rezíduá"
+)
+
+abline(h = 0,
+       col = "blue",
+       lty = 2)
+shapiro.test(residuals_btc)
+
+Box.test(
+  residuals_btc,
+  lag = 20,
+  type = "Ljung-Box"
+)
+  
+```
+Analýza rezíduí ukázala, že po odstránení trendovej zložky zostáva v dátach výrazná autokorelačná štruktúra.
+
+ACF vykazuje pomalý pokles a PACF obsahuje dominantný prvý lag, čo naznačuje vhodnosť autoregresných modelov typu AR(1) alebo všeobecnejšie ARIMA modelov.
+
+Výsledky Shapiro-Wilkovho aj Ljungovho-Boxovho testu potvrdzujú, že rezíduá nie sú bielym šumom a obsahujú ďalšie informácie využiteľné na predikciu budúcich cien Bitcoinu.
+
+### Spektrum reziduí
+
+```{r residual-spectrum, fig.width=7, fig.height=4}
+
+library(ggplot2)
+
+spec_res <- spec.pgram(
+  residuals_btc,
+  log = "no",
+  plot = FALSE
+)
+
+df_spec <- data.frame(
+  Frequency = spec_res$freq,
+  Spectrum  = spec_res$spec
+)
+
+ggplot(df_spec,
+       aes(x = Frequency,
+           y = Spectrum)) +
+  geom_line(colour = "steelblue") +
+  geom_point(
+    data = head(df_spec[order(-df_spec$Spectrum), ], 3),
+    colour = "red",
+    size = 3
+  ) +
+  labs(
+    title = "Spektrum rezíduí Bitcoinu",
+    x = "Frekvencia",
+    y = "Spektrálna hustota"
+  ) +
+  theme_minimal()
+```
+
+Spektrum rezíduí vykazuje najvyššie hodnoty pri veľmi nízkych frekvenciách, zatiaľ čo pri vyšších frekvenciách spektrálna hustota rýchlo klesá takmer k nule.
+
+To znamená, že väčšina variability rezíduí je sústredená v dlhodobých pohyboch a nie v pravidelných krátkodobých cykloch.
+
+V spektre sa nenachádzajú výrazné dominantné píky pri konkrétnych frekvenciách, ktoré by naznačovali prítomnosť silnej sezónnosti alebo periodického správania.
+
+Výsledok je v súlade s predchádzajúcou analýzou sezónnej zložky, kde ani dummy premenné podľa dní v týždni, ani goniometrický model nepotvrdili významnú sezónnosť cien Bitcoinu.
+
+Spektrálna analýza teda potvrdzuje, že hlavnú úlohu pri vývoji cien Bitcoinu zohráva trendová zložka a autoregresná závislosť, nie pravidelné sezónne cykly.
+
+# Integrované modely ARIMA, SARIMA
+
+## ARIMA modely
+
+```{r arima-models}
+
+# ARIMA modely pre trénovaciu časť cien Bitcoinu
+
+# Model ARIMA(1,1,0)
+arima_110 <- Arima(
+  btc_train,
+  order = c(1, 1, 0)
+)
+
+# Model ARIMA(0,1,1)
+arima_011 <- Arima(
+  btc_train,
+  order = c(0, 1, 1)
+)
+
+# Model ARIMA(1,1,1)
+arima_111 <- Arima(
+  btc_train,
+  order = c(1, 1, 1)
+)
+
+# Automatický výber najvhodnejšieho ARIMA modelu
+auto_btc <- auto.arima(
+  btc_train
+)
+
+# Výpis jednotlivých modelov
+summary(arima_110)
+summary(arima_011)
+summary(arima_111)
+summary(auto_btc)
+
+# Porovnanie modelov podľa AIC
+arima_comparison <- data.frame(
+  Model = c(
+    "ARIMA(1,1,0)",
+    "ARIMA(0,1,1)",
+    "ARIMA(1,1,1)",
+    paste0("auto.arima: ", arimaorder(auto_btc)[1], ",",
+           arimaorder(auto_btc)[2], ",",
+           arimaorder(auto_btc)[3])
+  ),
+  AIC = c(
+    AIC(arima_110),
+    AIC(arima_011),
+    AIC(arima_111),
+    AIC(auto_btc)
+  )
+)
+
+knitr::kable(
+  arima_comparison,
+  caption = "Porovnanie ARIMA modelov podľa AIC"
+)
+
+# Diagnostika rezíduí automaticky vybraného modelu
+checkresiduals(auto_btc)
+
+# Predikcia na dĺžku testovacej vzorky
+forecast_arima <- forecast(
+  auto_btc,
+  h = length(btc_test)
+)
+
+# Graf predikcie spolu s testovacími dátami
+autoplot(forecast_arima) +
+  autolayer(
+    btc_test,
+    series = "Skutočné hodnoty",
+    PI = FALSE
+  ) +
+  labs(
+    title = "Predikcia ceny Bitcoinu pomocou ARIMA modelu",
+    x = "Čas",
+    y = "Cena Bitcoinu (USD)"
+  ) +
+  theme_minimal()
+
+# Presnosť modelu na testovacej vzorke
+accuracy_arima <- accuracy(
+  forecast_arima,
+  btc_test
+)
+
+knitr::kable(
+  accuracy_arima,
+  caption = "Presnosť ARIMA modelu"
+)
+
+```
+ARIMA modely boli použité na modelovanie a predikciu cien Bitcoinu.
+
+Na základe porovnania AIC sa ako najvhodnejší ukázal model ARIMA(1,1,0). Automaticky vybraný model ARIMA(5,2,0) síce obsahoval viac parametrov, avšak dosahoval horšie informačné kritérium a veľmi slabé výsledky pri predikcii testovacích dát.
+
+Výsledky naznačujú, že samotné ARIMA modely nedokážu dostatočne zachytiť volatilitu kryptomenových trhov. Pre presnejšie predikcie by bolo vhodné modelovať logaritmické výnosy alebo využiť pokročilejšie metódy, napríklad GARCH modely alebo neurónové siete.
+
+## SARIMA model
+
+```{r sarima-model}
+
+sarima_model <- Arima(
+  btc_train,
+  order = c(1,1,1),
+  seasonal = list(
+    order = c(1,0,1),
+    period = 7
+  )
+)
+
+summary(sarima_model)
+
+checkresiduals(sarima_model)
+```
+Model SARIMA(1,1,1)(1,0,1)[7] poskytuje lepší opis dynamiky cien Bitcoinu než samotný trendový model.
+
+Napriek tomu Ljungov–Boxov test naznačuje, že rezíduá nie sú úplne náhodné. V dátach preto zostáva časová závislosť, ktorú model nedokázal zachytiť.
+
+Model možno považovať za použiteľný na krátkodobé prognózy, avšak pre presnejšie predikcie by bolo vhodné využiť pokročilejšie prístupy, napríklad modely volatility typu GARCH alebo neurónové siete.
+
+# ETS a Holt–Wintersova metódy
+
+## ETS model
+
+```{r ets-model}
+
+# ETS model pre Bitcoin
+ets_model <- ets(btc_train)
+
+summary(ets_model)
+
+# Diagnostika rezíduí
+checkresiduals(ets_model)
+
+# Predikcia
+ets_fc <- forecast(
+  ets_model,
+  h = length(btc_test)
+)
+
+autoplot(ets_fc) +
+  autolayer(
+    btc_test,
+    series = "Skutočné hodnoty"
+  ) +
+  labs(
+    title = "Predikcia ceny Bitcoinu pomocou ETS modelu",
+    x = "Čas",
+    y = "Cena Bitcoinu (USD)"
+  ) +
+  theme_minimal()
+
+accuracy(
+  ets_fc,
+  btc_test
+)
+```
+Model ETS(M,Ad,N) sa ukázal ako veľmi vhodný pre modelovanie cien Bitcoinu.
+
+Na rozdiel od viacerých ARIMA modelov jeho rezíduá spĺňajú predpoklad bieleho šumu (p = 0.6179), čo naznačuje kvalitné zachytenie systematickej zložky časového radu.
+
+Spomedzi všetkých analyzovaných modelov patrí ETS model k najlepším kandidátom na krátkodobé prognózovanie cien Bitcoinu.
+
+## Holt
+
+```{r holt-model}
+
+# Holtov model (trend bez sezónnosti)
+
+holt_model <- holt(
+  btc_train,
+  h = length(btc_test)
+)
+
+autoplot(holt_model) +
+  autolayer(
+    btc_test,
+    series = "Skutočné hodnoty"
+  ) +
+  labs(
+    title = "Predikcia ceny Bitcoinu pomocou Holtovej metódy",
+    x = "Čas",
+    y = "Cena Bitcoinu (USD)"
+  ) +
+  theme_minimal()
+
+accuracy(
+  holt_model,
+  btc_test
+)
+```
+Holtova metóda síce dokáže zachytiť základný trend vývoja cien Bitcoinu, avšak pri predikcii budúceho vývoja dosahuje nižšiu presnosť než ETS model.
+
+# Diagnostika a predpovede
+
+## Predpovede ARIMA modelom
+
+```{r}
+forecast_arima <- forecast(auto_btc,
+                           h = length(btc_test))
+
+autoplot(forecast_arima) +
+  autolayer(btc_test,
+            series = "Skutočné ceny",
+            PI = FALSE) +
+  ggtitle("Predikcia ceny Bitcoinu pomocou ARIMA modelu") +
+  xlab("Čas") +
+  ylab("Cena Bitcoinu (USD)")
+```
+
+## Predpovede ETS modelom
+
+```{r}
+forecast_ets <- forecast(ets_model,
+                         h = length(btc_test))
+
+autoplot(forecast_ets) +
+  autolayer(btc_test,
+            series = "Skutočné ceny",
+            PI = FALSE) +
+  ggtitle("Predikcia ceny Bitcoinu pomocou ETS modelu") +
+  xlab("Čas") +
+  ylab("Cena Bitcoinu (USD)")
+```
+
+## Predpovede SARIMA modelom
+
+```{r}
+forecast_sarima <- forecast(sarima_model,
+                            h = length(btc_test))
+
+autoplot(forecast_sarima) +
+  autolayer(btc_test,
+            series = "Skutočné ceny",
+            PI = FALSE) +
+  ggtitle("Predikcia ceny Bitcoinu pomocou SARIMA modelu") +
+  xlab("Čas") +
+  ylab("Cena Bitcoinu (USD)")
+```
+
+## Porovnanie modelov – presnosť
+
+```{r model-accuracy}
+accuracy_arima <- accuracy(
+  forecast_arima$mean,
+  btc_test
+)
+
+accuracy_ets <- accuracy(
+  forecast_ets$mean,
+  btc_test
+)
+
+accuracy_sarima <- accuracy(
+  forecast_sarima$mean,
+  btc_test
+)
+knitr::kable(accuracy_arima, caption = "Presnosť ARIMA modelu")
+knitr::kable(accuracy_ets, caption = "Presnosť ETS modelu")
+knitr::kable(accuracy_sarima, caption = "Presnosť SARIMA modelu")
+```
+Na základe porovnania predikčných metrík RMSE, MAE a MAPE možno konštatovať, že najpresnejším modelom pre prognózovanie cien Bitcoinu bol SARIMA model. ETS model dosiahol veľmi podobné výsledky, zatiaľ čo klasický ARIMA model vykázal výrazne vyššie chyby predikcie.
+
+Preto bol ako finálny model zvolený SARIMA model, ktorý najlepšie zachytáva dynamiku a krátkodobé sezónne správanie cien kryptomeny Bitcoin.
+
+# Zhodnotenie
+
+## Výber najlepších modelov
+
+V projekte boli porovnané viaceré modely časových radov pre denné ceny Bitcoinu. Konkrétne išlo o ARIMA, SARIMA, ETS a Holtovu metódu.
+
+**ARIMA model** dosiahol na testovacej vzorke veľmi slabé výsledky. Hodnota RMSE bola približne 280 820.9 USD a MAPE dosiahla 303.20 %. To znamená, že model mal veľmi veľkú predikčnú chybu a nedokázal spoľahlivo zachytiť budúci vývoj cien Bitcoinu. ARIMA model bol preto najmenej vhodný spomedzi porovnávaných modelov.
+
+**SARIMA(1,1,1)(1,0,1)[7]** dosiahol najlepšie výsledky podľa testovacích metrík. Hodnota RMSE bola 33 317.08 USD, MAE 27 884.93 USD a MAPE 35.58 %. Model mierne prekonal ETS model. Pridanie týždennej sezónnej zložky teda prinieslo malé zlepšenie predikčnej presnosti, hoci predchádzajúca analýza nepreukázala silnú týždennú sezónnosť.
+
+**ETS(M,Ad,N)** bol druhým najlepším modelom. Na testovacej vzorke dosiahol RMSE = 33 385.23 USD, MAE = 27 953.14 USD a MAPE = 35.66 %. Model neobsahuje sezónnu zložku, čo zodpovedá výsledkom predchádzajúcej analýzy, kde sa významná sezónnosť cien Bitcoinu nepotvrdila. Výhodou ETS modelu je dobrá interpretovateľnosť a vhodná diagnostika rezíduí.
+
+**Holtova metóda** dosiahla horšie výsledky než ETS a SARIMA. Na testovacej vzorke mala RMSE približne 70 543.41 USD a MAPE 76.09 %. Model predpokladal pokračovanie rastúceho trendu, no skutočné ceny v testovacom období klesali, preto prognóza budúce ceny nadhodnocovala.
+
+Na základe metrík RMSE, MAE a MAPE možno za najlepší model považovať **SARIMA(1,1,1)(1,0,1)[7]**, pretože dosiahol najnižšie predikčné chyby na testovacej vzorke. ETS model však dosiahol veľmi podobné výsledky, preto ho možno považovať za takmer rovnocennú alternatívu.
+
+---
+
+## Vizualizované predikcie vybraných modelov
+
+```{r visualized-forecasts, fig.width=8, fig.height=8}
+
+# Graf ARIMA
+p1 <- autoplot(forecast_arima) +
+  autolayer(
+    btc_test,
+    series = "Skutočné ceny",
+    PI = FALSE
+  ) +
+  ggtitle("Predikcia ARIMA modelom") +
+  xlab("Čas") +
+  ylab("Cena Bitcoinu (USD)") +
+  theme_minimal()
+
+# Graf SARIMA
+p2 <- autoplot(forecast_sarima) +
+  autolayer(
+    btc_test,
+    series = "Skutočné ceny",
+    PI = FALSE
+  ) +
+  ggtitle("Predikcia SARIMA modelom") +
+  xlab("Čas") +
+  ylab("Cena Bitcoinu (USD)") +
+  theme_minimal()
+
+# Graf ETS
+p3 <- autoplot(forecast_ets) +
+  autolayer(
+    btc_test,
+    series = "Skutočné ceny",
+    PI = FALSE
+  ) +
+  ggtitle("Predikcia ETS modelom") +
+  xlab("Čas") +
+  ylab("Cena Bitcoinu (USD)") +
+  theme_minimal()
+
+grid.arrange(p1, p2, p3, ncol = 1)
+```
+
+Na grafoch sú zobrazené predikované hodnoty jednotlivých modelov spolu so skutočnými hodnotami testovacej vzorky.
+
+* **ARIMA model** vytvára veľmi nepresnú prognózu. Predikčné intervaly sú extrémne široké a model sa výrazne odchyľuje od skutočných cien. Tento výsledok potvrdzuje aj veľmi vysoká hodnota MAPE.
+
+* **SARIMA model** najlepšie sleduje skutočný vývoj cien Bitcoinu v testovacom období. Hoci predikcia stále obsahuje chybu, model dosahuje najnižšie hodnoty RMSE, MAE a MAPE.
+
+* **ETS model** poskytuje veľmi podobné výsledky ako SARIMA. Jeho prognóza je stabilnejšia a intervaly neistoty sú realistickejšie než pri ARIMA modeli. Rozdiel medzi ETS a SARIMA je malý.
+
+Celkovo možno konštatovať, že ARIMA model nebol vhodný pre prognózovanie cien Bitcoinu v tomto období. Najlepšie výsledky dosiahol SARIMA model, pričom ETS model predstavuje veľmi dobrú alternatívu.
+
+---
+
+## Záverečné zhodnotenie
+
+Analýza časového radu cien Bitcoinu ukázala, že tento rad je charakteristický výrazným trendom, vysokou volatilitou a silnou časovou závislosťou.
+
+Sezónna zložka nebola jednoznačne potvrdená. Dummy premenné podľa dní v týždni, goniometrický model aj spektrálna analýza ukázali, že týždenná sezónnosť je slabá. Napriek tomu SARIMA model s periódou 7 dní dosiahol mierne lepšie predikčné výsledky než ETS model.
+
+Najlepším modelom podľa testovacích metrík bol SARIMA model. ETS model však dosiahol veľmi podobnú presnosť a mal lepšiu diagnostiku rezíduí, preto ho možno považovať za stabilnú alternatívu.
+
+Predikcia cien kryptomien je náročná, pretože ich vývoj je ovplyvnený mnohými externými faktormi, napríklad makroekonomickými správami, reguláciou, náladou investorov a náhlymi trhovými šokmi. Klasické modely časových radov preto dokážu zachytiť iba časť dynamiky cien.
